@@ -1,0 +1,6 @@
+{
+  "appId": "com.quintal.app",
+  "appName": "Quintal",
+  "webDir": "dist",
+  "server": { "androidScheme": "https" }
+}

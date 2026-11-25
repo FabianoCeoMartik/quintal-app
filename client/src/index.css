@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { @apply bg-ceu text-tinta font-sans antialiased; }
+:focus-visible { outline: 2px solid #2B4BF2; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
