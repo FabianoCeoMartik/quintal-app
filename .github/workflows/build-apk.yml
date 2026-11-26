@@ -5,10 +5,15 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  # Capacitor 6 -> compileSdk/targetSdk 34, Gradle 8.2 / AGP 8.2, Java 17
+  ANDROID_PLATFORM: "android-34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     defaults:
       run:
@@ -29,8 +34,43 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
+      # Não usa a action android-actions/setup-android (falhava ao aceitar licenças).
+      # O runner ubuntu-latest já traz o Android SDK; aqui só localizamos,
+      # aceitamos as licenças e instalamos platform + build-tools.
+      - name: Configurar Android SDK
+        run: |
+          set -u
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$SDK"
+
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "cmdline-tools não encontrado em $SDK, baixando..."
+            curl -fsSL -o /tmp/cmdline-tools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools
+            mkdir -p "$SDK/cmdline-tools"
+            rm -rf "$SDK/cmdline-tools/latest"
+            mv /tmp/cmdline-tools/cmdline-tools "$SDK/cmdline-tools/latest"
+          fi
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+
+          # Aceitar licenças (o 'yes' pode terminar com SIGPIPE/141: ignoramos esse código)
+          set +e
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /tmp/licenses.log 2>&1
+          set -e
+          tail -n 5 /tmp/licenses.log || true
+
+          "$SDKMANAGER" --sdk_root="$SDK" \
+            "platform-tools" \
+            "platforms;${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+          "$SDKMANAGER" --sdk_root="$SDK" --list_installed
 
       - name: Instalar dependências (npm install)
         run: npm install
@@ -42,6 +82,10 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_SOCKET_URL: ${{ secrets.VITE_SOCKET_URL || 'http://10.0.2.2:3001' }}
+
+      - name: Apontar o Gradle para o SDK
+        working-directory: client/android
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Compilar app-debug.apk
         working-directory: client/android
