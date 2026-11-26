@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
 
 env:
-  # Capacitor 6 -> compileSdk/targetSdk 34, Gradle 8.2 / AGP 8.2, Java 17
+  # Capacitor 6 -> compileSdk/targetSdk 34, Gradle 8.2 / AGP 8.2.1, Java 17
   ANDROID_PLATFORM: "android-34"
   ANDROID_BUILD_TOOLS: "34.0.0"
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     defaults:
       run:
@@ -34,7 +34,6 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # Não usa a action android-actions/setup-android (falhava ao aceitar licenças).
       # O runner ubuntu-latest já traz o Android SDK; aqui só localizamos,
       # aceitamos as licenças e instalamos platform + build-tools.
       - name: Configurar Android SDK
@@ -72,6 +71,54 @@ jobs:
 
           "$SDKMANAGER" --sdk_root="$SDK" --list_installed
 
+      # Garante acesso ONLINE ao Gradle (sem --offline), com repositórios corretos
+      # (Google + Maven Central + espelho do Google), timeouts maiores e retries.
+      - name: Configurar Gradle (online, repositórios e timeouts)
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+
+          cat > "$HOME/.gradle/gradle.properties" <<'EOF'
+          org.gradle.daemon=false
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          systemProp.org.gradle.internal.http.connectionTimeout=120000
+          systemProp.org.gradle.internal.http.socketTimeout=120000
+          systemProp.org.gradle.internal.repository.max.retries=6
+          systemProp.org.gradle.internal.repository.initial.backoff=2000
+          EOF
+
+          # Init script: adiciona os repositórios tanto para o classpath do plugin (AGP/Kotlin)
+          # quanto para as dependências dos módulos, mesmo que o projeto gerado não os declare.
+          cat > "$HOME/.gradle/init.d/repos.gradle" <<'EOF'
+          allprojects {
+            buildscript {
+              repositories {
+                google()
+                maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+                mavenCentral()
+                gradlePluginPortal()
+              }
+            }
+            repositories {
+              google()
+              maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+              mavenCentral()
+            }
+          }
+          EOF
+
+          echo "== gradle.properties =="; cat "$HOME/.gradle/gradle.properties"
+
+      - name: Testar acesso aos repositórios Maven (diagnóstico)
+        continue-on-error: true
+        run: |
+          for url in \
+            "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/1.9.0/kotlin-stdlib-jdk8-1.9.0.pom" \
+            "https://maven-central.storage-download.googleapis.com/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/1.9.0/kotlin-stdlib-jdk8-1.9.0.pom" \
+            "https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/8.2.1/gradle-8.2.1.pom"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$url" || echo "falhou")
+            echo "$code  $url"
+          done
+
       - name: Instalar dependências (npm install)
         run: npm install
 
@@ -91,7 +138,20 @@ jobs:
         working-directory: client/android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          # Online (sem --offline). Até 3 tentativas: falhas de rede ao baixar
+          # kotlin-stdlib/AGP costumam ser temporárias.
+          for attempt in 1 2 3; do
+            echo "=== Tentativa $attempt de 3 ==="
+            EXTRA=""
+            if [ "$attempt" -gt 1 ]; then EXTRA="--refresh-dependencies"; fi
+            if ./gradlew assembleDebug --no-daemon --stacktrace $EXTRA; then
+              exit 0
+            fi
+            echo "Falhou na tentativa $attempt; aguardando antes de tentar de novo..."
+            sleep 20
+          done
+          echo "Todas as tentativas falharam."
+          exit 1
 
       - name: Publicar o APK como artifact
         uses: actions/upload-artifact@v4
