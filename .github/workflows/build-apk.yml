@@ -9,6 +9,11 @@ env:
   # Capacitor 6 -> compileSdk/targetSdk 34, Gradle 8.2 / AGP 8.2.1, Java 17
   ANDROID_PLATFORM: "android-34"
   ANDROID_BUILD_TOOLS: "34.0.0"
+  # Variáveis do Vite: são gravadas no app durante o "npm run build".
+  # VITE_SOCKET_URL tem um valor padrão caso o secret não exista.
+  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+  VITE_SOCKET_URL: ${{ secrets.VITE_SOCKET_URL || 'http://10.0.2.2:3001' }}
 
 jobs:
   build-apk:
@@ -22,6 +27,23 @@ jobs:
     steps:
       - name: Baixar o código
         uses: actions/checkout@v4
+
+      # Falha cedo e com mensagem clara se os secrets não existirem
+      # (sem eles o APK abre só a tela de "Configuração incompleta").
+      - name: Verificar variáveis de ambiente (secrets)
+        run: |
+          missing=0
+          if [ -z "${VITE_SUPABASE_URL}" ]; then
+            echo "::error::Secret VITE_SUPABASE_URL não configurado (Settings > Secrets and variables > Actions)."
+            missing=1
+          fi
+          if [ -z "${VITE_SUPABASE_ANON_KEY}" ]; then
+            echo "::error::Secret VITE_SUPABASE_ANON_KEY não configurado (Settings > Secrets and variables > Actions)."
+            missing=1
+          fi
+          echo "VITE_SOCKET_URL em uso: ${VITE_SOCKET_URL}"
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "Variáveis OK."
 
       - name: Node 20
         uses: actions/setup-node@v4
@@ -122,13 +144,22 @@ jobs:
       - name: Instalar dependências (npm install)
         run: npm install
 
-      # Faz: vite build -> npx cap add android -> patch do AndroidManifest -> npx cap sync android
-      - name: Gerar o projeto Android (Capacitor)
-        run: npm run android:setup
-        env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_SOCKET_URL: ${{ secrets.VITE_SOCKET_URL || 'http://10.0.2.2:3001' }}
+      # 1) Build do client COM as variáveis VITE_* injetadas (ficam gravadas em dist/)
+      - name: Build do client (npm run build)
+        run: |
+          npm run build
+          test -f dist/index.html
+          echo "== dist/index.html =="; cat dist/index.html
+
+      # 2) Cria o projeto Android do Capacitor e aplica o patch do manifest
+      - name: Criar projeto Android (cap add + patch)
+        run: |
+          npx cap add android
+          node scripts/patch-android.mjs
+
+      # 3) Copia o dist/ (já com as variáveis) para dentro do projeto Android
+      - name: Sincronizar Capacitor (cap sync android)
+        run: npx cap sync android
 
       - name: Apontar o Gradle para o SDK
         working-directory: client/android
